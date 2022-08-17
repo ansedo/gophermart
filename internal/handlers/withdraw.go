@@ -1,0 +1,57 @@
+package handlers
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+
+	"github.com/ansedo/gophermart/internal/helpers"
+	"github.com/ansedo/gophermart/internal/luhn"
+	"github.com/ansedo/gophermart/internal/middlewares"
+	"github.com/ansedo/gophermart/internal/models"
+	"github.com/ansedo/gophermart/internal/services/gophermart"
+	"github.com/jmoiron/sqlx"
+)
+
+func Withdraw(g *gophermart.Gophermart) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, err := middlewares.GetUserFromCtx(r.Context())
+		if err != nil {
+			helpers.HTTPError(w, err)
+			return
+		}
+
+		withdrawal := models.Withdrawal{UID: user.ID}
+		if err = json.NewDecoder(r.Body).Decode(&withdrawal); err != nil {
+			helpers.HTTPError(w, err)
+			return
+		}
+
+		if !luhn.Valid(withdrawal.OrderID) {
+			helpers.HTTPError(w, models.ErrInvalidOrderNumber)
+			return
+		}
+
+		err = g.Storage.Transaction(r.Context(), func(ctx context.Context, tx *sqlx.Tx) (err error) {
+			balance, err := g.Storage.GetCurrentBalanceByUID(ctx, user.ID, tx)
+			if err != nil {
+				return
+			}
+
+			if balance < withdrawal.Amount {
+				return models.ErrInsufficientFunds
+			}
+
+			if err = g.Storage.AddWithdrawal(ctx, withdrawal, tx); err != nil {
+				return
+			}
+
+			return g.Storage.IncrBalanceWithdrawnByUID(ctx, user.ID, withdrawal.Amount, tx)
+		})
+		if err != nil {
+			helpers.HTTPError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}
+}
